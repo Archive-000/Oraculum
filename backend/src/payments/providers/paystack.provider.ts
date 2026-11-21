@@ -8,12 +8,11 @@ const MAX_TRANSIENT_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 100;
 
 function isTransientPaystackError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) {
-    const message = error instanceof Error ? error.message : String(error);
-    return /timeout|econnreset|econnrefused|enotfound|network|socket hang up/i.test(message);
-  }
-  const status = error.response?.status;
-  return status === undefined || status === 408 || status === 429 || (status >= 500 && status <= 599);
+  const candidate = error as { response?: { status?: number }; code?: string; message?: string } | null;
+  const status = candidate?.response?.status;
+  if (status !== undefined) return status === 408 || status === 429 || (status >= 500 && status <= 599);
+  const detail = `${candidate?.code ?? ''} ${candidate?.message ?? (error instanceof Error ? error.message : String(error))}`;
+  return /timeout|etimedout|econnreset|econnrefused|enotfound|network|socket hang up/i.test(detail);
 }
 
 @Injectable()
