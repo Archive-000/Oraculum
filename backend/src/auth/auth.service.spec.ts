@@ -21,6 +21,7 @@ import { EmailService } from '../email/email.service';
 import { ConfigService } from '@nestjs/config';
 import { UserHelper } from './helper/user-helper';
 import { UserMessages } from './helper/user-messages';
+import { ForgotPasswordProvider } from '../users/providers/forgotPassword.provider';
 
 // `otplib` is an external service irrelevant to these tests — mock it so the suite runs in isolation.
 jest.mock('otplib', () => ({
@@ -482,5 +483,38 @@ describe('AuthService email normalization (BE-17)', () => {
       where: { email: 'jane.doe@example.com' },
     });
     expect(users.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('ForgotPasswordProvider (#856)', () => {
+  it('returns the same success response for existing and unknown emails', async () => {
+    const users = {
+      findOne: jest
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          email: 'known@example.com',
+          firstname: 'Known',
+          lastname: 'User',
+        }),
+    };
+    const email = {
+      sendPasswordResetLinkEmail: jest.fn().mockResolvedValue(true),
+    };
+    const config = { get: jest.fn() };
+    const provider = new ForgotPasswordProvider(
+      users as any,
+      email as any,
+      config as any,
+    );
+
+    const unknownResult = await provider.execute('unknown@example.com');
+    const knownResult = await provider.execute('known@example.com');
+
+    expect(unknownResult).toEqual(knownResult);
+    expect(unknownResult).toEqual({
+      message: 'Password reset instructions sent to email',
+    });
+    expect(email.sendPasswordResetLinkEmail).toHaveBeenCalledTimes(1);
   });
 });

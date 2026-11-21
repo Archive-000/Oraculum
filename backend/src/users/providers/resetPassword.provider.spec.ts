@@ -99,21 +99,39 @@ describe('ResetPasswordProvider (single-use token)', () => {
   });
 
   it('consumes the token atomically and triggers post-reset cleanup', async () => {
-    usersRepo.findOne.mockResolvedValue({
-      id: 'u1',
-      email: 'a@b',
-      firstname: 'A',
-      lastname: 'B',
-      passwordResetToken: HASHED,
-      passwordResetExpiresIn: new Date(Date.now() + 60_000),
-    } as any);
-    usersRepo.update.mockResolvedValue({ affected: 1, raw: [], generatedMaps: [] });
+    usersRepo.findOne
+      .mockResolvedValueOnce({
+        id: 'u1',
+        email: 'a@b',
+        firstname: 'A',
+        lastname: 'B',
+        passwordResetToken: HASHED,
+        passwordResetExpiresIn: new Date(Date.now() + 60_000),
+      } as any)
+      .mockResolvedValueOnce(null);
+    usersRepo.update.mockResolvedValue({
+      affected: 1,
+      raw: [],
+      generatedMaps: [],
+    });
 
     const result = await provider.execute(RAW_TOKEN, 'newPw1234');
     expect(result).toEqual({ message: 'Password reset successful' });
     expect(usersRepo.update).toHaveBeenCalledTimes(1);
+    expect(usersRepo.update.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        password: 'hashed-pw',
+        passwordResetToken: null,
+        passwordResetExpiresIn: null,
+      }),
+    );
     expect(refreshTokens.revokeAllRefreshTokens).toHaveBeenCalledWith('u1');
     expect(emails.sendPasswordResetSuccessEmail).toHaveBeenCalled();
+
+    await expect(
+      provider.execute(RAW_TOKEN, 'anotherPw1234'),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(usersRepo.update).toHaveBeenCalledTimes(1);
   });
 
   it('treats a zero-affected update as already-used (race-safe)', async () => {

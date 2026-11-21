@@ -60,20 +60,24 @@ describe('SetupTotpProvider (BE-11)', () => {
       expect.objectContaining({
         twoFactorEnabled: true,
         totpSecret: 'SECRET',
+        totpPendingSecret: null,
       }),
     );
   });
 
-  it('invalid confirmation leaves 2FA disabled', async () => {
+  it('invalid confirmation leaves setup pending for retry', async () => {
     (verifySync as jest.Mock).mockReturnValue({ valid: false });
-    repo.findOne.mockResolvedValue({
+    const user = {
       id: 'u1',
       twoFactorEnabled: false,
       totpPendingSecret: 'SECRET',
-    });
+    };
+    repo.findOne.mockResolvedValue(user);
     await expect(
       provider.confirm2faSetup('u1', { token: '000000' } as any),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(user.totpPendingSecret).toBe('SECRET');
+    expect(user.twoFactorEnabled).toBe(false);
     expect(repo.save).not.toHaveBeenCalled();
   });
 });

@@ -74,7 +74,7 @@ describe('assertAllowedImageMimeType', () => {
 
   it('rejects content that does not match the declared image type', () => {
     expect(() =>
-      assertAllowedImageMimeType(file(GIF, 'image/png', 'avatar.png')),
+      assertAllowedImageMimeType(file(PNG, 'image/jpeg', 'avatar.jpg')),
     ).toThrow(BadRequestException);
   });
 
