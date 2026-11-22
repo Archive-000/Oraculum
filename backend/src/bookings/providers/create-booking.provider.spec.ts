@@ -3,7 +3,19 @@ import { CreateBookingProvider } from './create-booking.provider';
 import { BookingStatus } from '../enums/booking-status.enum';
 import { Workspace } from '../../workspaces/entities/workspace.entity';
 
+const FIXED_NOW = new Date('2026-10-15T12:00:00Z');
+
 describe('CreateBookingProvider interval overlap checks', () => {
+  const originalBookingTimeZone = process.env.BOOKING_TIMEZONE;
+
+  afterEach(() => {
+    if (originalBookingTimeZone === undefined) {
+      delete process.env.BOOKING_TIMEZONE;
+    } else {
+      process.env.BOOKING_TIMEZONE = originalBookingTimeZone;
+    }
+  });
+
   const queryBuilder = () => ({
     select: jest.fn().mockReturnThis(),
     setLock: jest.fn().mockReturnThis(),
@@ -50,6 +62,7 @@ describe('CreateBookingProvider interval overlap checks', () => {
         seatCount: 1,
       },
       'user-1',
+      FIXED_NOW,
     );
 
     expect(bookingQuery.andWhere).toHaveBeenCalledWith(
@@ -173,8 +186,8 @@ describe('CreateBookingProvider interval overlap checks', () => {
     };
 
     const results = await Promise.allSettled([
-      provider.create(request, 'user-1'),
-      provider.create(request, 'user-2'),
+      provider.create(request, 'user-1', FIXED_NOW),
+      provider.create(request, 'user-2', FIXED_NOW),
     ]);
 
     expect(dataSource.transaction).toHaveBeenCalledTimes(2);
@@ -207,7 +220,75 @@ describe('CreateBookingProvider interval overlap checks', () => {
           seatCount: 1,
         },
         'user-1',
+        FIXED_NOW,
       ),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a start date that is already past in the configured timezone', async () => {
+    process.env.BOOKING_TIMEZONE = 'Africa/Lagos';
+    const transaction = jest.fn();
+    const provider = new CreateBookingProvider(
+      {} as never,
+      {} as never,
+      {} as never,
+      { transaction } as never,
+      {} as never,
+      {} as never,
+    );
+
+    await expect(
+      provider.create(
+        {
+          workspaceId: 'workspace-1',
+          planType: 'hourly' as never,
+          startDate: '2026-10-16',
+          endDate: '2026-10-17',
+          seatCount: 1,
+        },
+        'user-1',
+        new Date('2026-10-16T23:30:00Z'),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('accepts a start date that is today in the configured timezone', async () => {
+    process.env.BOOKING_TIMEZONE = 'Africa/Lagos';
+    const workspaceQuery = queryBuilder();
+    const bookingQuery = queryBuilder();
+    const save = jest.fn().mockResolvedValue({ id: 'booking-1' });
+    const manager = {
+      createQueryBuilder: jest
+        .fn()
+        .mockReturnValueOnce(workspaceQuery)
+        .mockReturnValueOnce(bookingQuery),
+      create: jest.fn((_entity, value) => value),
+      save,
+    };
+    const transaction = jest.fn((callback) => callback(manager));
+    const provider = new CreateBookingProvider(
+      {} as never,
+      { findOne: jest.fn().mockResolvedValue(null) } as never,
+      { calculateAmount: jest.fn().mockReturnValue(100) } as never,
+      { transaction } as never,
+      {} as never,
+      { invalidateBookingList: jest.fn().mockResolvedValue(undefined) } as never,
+    );
+
+    await provider.create(
+      {
+        workspaceId: 'workspace-1',
+        planType: 'hourly' as never,
+        startDate: '2026-10-17',
+        endDate: '2026-10-18',
+        seatCount: 1,
+      },
+      'user-1',
+      new Date('2026-10-16T23:30:00Z'),
+    );
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(save).toHaveBeenCalledTimes(1);
   });
 });
