@@ -110,6 +110,17 @@ impl PaymentEscrowContract {
         Ok(())
     }
 
+    /// A deposit must be strictly positive. Zero-value escrows are meaningless
+    /// records, and negative amounts would invert the token transfer at
+    /// creation time. Called before any token movement or storage write so a
+    /// rejected deposit cannot leave a partial escrow record or stale index.
+    fn require_positive_deposit(amount: i128) -> Result<(), Error> {
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        Ok(())
+    }
+
     // ── Initialisation ────────────────────────────────────────────────────────
 
     /// One-time setup.
@@ -220,9 +231,7 @@ impl PaymentEscrowContract {
     ) -> Result<(), Error> {
         depositor.require_auth();
 
-        if amount <= 0 {
-            return Err(Error::InvalidAmount);
-        }
+        Self::require_positive_deposit(amount)?;
         if depositor == beneficiary {
             return Err(Error::DepositorIsBeneficiary);
         }
