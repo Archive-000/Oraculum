@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -28,12 +27,7 @@ export class ForgotPasswordProvider {
     try {
       const user = await this.usersRepository.findOne({ where: { email } });
       if (!user) {
-        // We deliberately use the same wording as for an existing address to
-        // avoid leaking which emails have accounts. A 404 here signals a real
-        // misroute to the operator while keeping public responses consistent.
-        throw new NotFoundException(
-          'If an account exists for this email, reset instructions have been sent',
-        );
+        return { message: 'Password reset instructions sent to email' };
       }
 
       // Generate a fresh 256-bit token. The hashed copy is what we store; the

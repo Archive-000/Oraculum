@@ -70,7 +70,7 @@ export class SetupTotpProvider {
     const { plain, hashed } = await generateAndHashBackupCodes();
 
     user.totpSecret = user.totpPendingSecret;
-    user.totpPendingSecret = null as unknown as undefined;
+    user.totpPendingSecret = null;
     user.twoFactorEnabled = true;
     user.totpBackupCodes = hashed;
     await this.usersRepository.save(user);
