@@ -19,6 +19,38 @@ import { User } from '../../users/entities/user.entity';
 import { EmailService } from '../../email/email.service';
 import { CacheInvalidationProvider } from '../../common/providers/cache-invalidation.provider';
 
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function configuredBookingTimeZone(): string {
+  const timeZone = process.env.BOOKING_TIMEZONE?.trim() || 'UTC';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone });
+    return timeZone;
+  } catch {
+    return 'UTC';
+  }
+}
+
+function dateKeyInTimeZone(now: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const part = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((entry) => entry.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+function startDateIsInPast(startDate: string, now: Date): boolean {
+  if (DATE_ONLY_PATTERN.test(startDate)) {
+    return startDate < dateKeyInTimeZone(now, configuredBookingTimeZone());
+  }
+  const startMs = Date.parse(startDate);
+  return Number.isFinite(startMs) && startMs < now.getTime();
+}
+
 @Injectable()
 export class CreateBookingProvider {
   private readonly logger = new Logger(CreateBookingProvider.name);
@@ -34,9 +66,12 @@ export class CreateBookingProvider {
     private readonly cacheInvalidation: CacheInvalidationProvider,
   ) {}
 
-  async create(dto: CreateBookingDto, userId: string): Promise<Booking> {
+  async create(dto: CreateBookingDto, userId: string, now: Date = new Date()): Promise<Booking> {
     if (new Date(dto.endDate) <= new Date(dto.startDate)) {
       throw new BadRequestException('endDate must be after startDate');
+    }
+    if (startDateIsInPast(dto.startDate, now)) {
+      throw new BadRequestException('startDate cannot be in the past');
     }
 
     const saved = await this.dataSource.transaction(async (manager) => {
@@ -134,9 +169,13 @@ export class CreateBookingProvider {
   async createRecurring(
     dto: CreateRecurringBookingDto,
     userId: string,
+    now: Date = new Date(),
   ): Promise<Booking[]> {
     if (new Date(dto.endDate) <= new Date(dto.startDate)) {
       throw new BadRequestException('endDate must be after startDate');
+    }
+    if (startDateIsInPast(dto.startDate, now)) {
+      throw new BadRequestException('startDate cannot be in the past');
     }
     if (!Number.isInteger(dto.occurrenceCount) || dto.occurrenceCount < 1) {
       throw new BadRequestException('occurrenceCount must be a positive integer');
