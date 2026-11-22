@@ -163,9 +163,10 @@ fn test_create_escrow_duplicate_id_fails() {
     );
 }
 
-#[test]
-#[should_panic(expected = "Error(Contract, #11)")]
-fn test_create_escrow_zero_amount_fails() {
+/// A rejected deposit must be completely inert: no escrow record, no index
+/// entries and no token movement. Reusing the same escrow ID afterwards proves
+/// that nothing was left behind by the failed call.
+fn assert_invalid_deposit_leaves_storage_unchanged(amount: i128) {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -176,15 +177,57 @@ fn test_create_escrow_zero_amount_fails() {
 
     let contract_id = setup_contract(&env);
     let client = init(&env, &contract_id, &admin, &token);
+    let escrow_id = String::from_str(&env, "esc-invalid");
+    let token_client = TokenClient::new(&env, &token);
 
-    client.create_escrow(
+    let depositor_before = token_client.balance(&depositor);
+    let contract_before = token_client.balance(&contract_id);
+
+    let result = client.try_create_escrow(
         &depositor,
-        &String::from_str(&env, "esc-001"),
+        &escrow_id,
         &beneficiary,
-        &0i128,
-        &String::from_str(&env, "Zero deposit"),
+        &amount,
+        &String::from_str(&env, "Invalid deposit"),
         &0u64,
     );
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+
+    // No escrow record was stored.
+    assert_eq!(
+        client.try_get_escrow(&escrow_id),
+        Err(Ok(Error::EscrowNotFound))
+    );
+    // Neither lookup index was touched.
+    assert!(client.get_depositor_escrows(&depositor).is_empty());
+    assert!(client.get_beneficiary_escrows(&beneficiary).is_empty());
+    // No funds moved into or out of the contract.
+    assert_eq!(token_client.balance(&depositor), depositor_before);
+    assert_eq!(token_client.balance(&contract_id), contract_before);
+
+    // The rejected ID is still free — a valid deposit with the same ID works.
+    client.create_escrow(
+        &depositor,
+        &escrow_id,
+        &beneficiary,
+        &5_000i128,
+        &String::from_str(&env, "Valid deposit after rejection"),
+        &0u64,
+    );
+    let escrow = client.get_escrow(&escrow_id);
+    assert_eq!(escrow.amount, 5_000i128);
+    assert_eq!(client.get_depositor_escrows(&depositor).len(), 1);
+    assert_eq!(client.get_beneficiary_escrows(&beneficiary).len(), 1);
+}
+
+#[test]
+fn test_create_escrow_zero_deposit_leaves_storage_unchanged() {
+    assert_invalid_deposit_leaves_storage_unchanged(0i128);
+}
+
+#[test]
+fn test_create_escrow_negative_deposit_leaves_storage_unchanged() {
+    assert_invalid_deposit_leaves_storage_unchanged(-1i128);
 }
 
 // ── Admin release / refund ────────────────────────────────────────────────────
@@ -213,8 +256,11 @@ fn test_release_sends_funds_to_beneficiary() {
 
     client.release(&admin, &String::from_str(&env, "esc-001"));
 
-    assert_eq!(TokenClient::new(&env, &token).balance(&beneficiary), 5_000);
-    assert_eq!(TokenClient::new(&env, &token).balance(&contract_id), 0);
+    let token_client = TokenClient::new(&env, &token);
+    // 250 bps of 5_000 is 125; the beneficiary receives the remainder.
+    assert_eq!(token_client.balance(&beneficiary), 4_875);
+    assert_eq!(token_client.balance(&admin), 125);
+    assert_eq!(token_client.balance(&contract_id), 0);
 
     let escrow = client.get_escrow(&String::from_str(&env, "esc-001"));
     assert_eq!(escrow.status, EscrowStatus::Released);
@@ -424,14 +470,16 @@ fn test_resolve_dispute_releases_to_beneficiary() {
     client.raise_dispute(&depositor, &String::from_str(&env, "esc-001"));
     client.resolve_dispute(&admin, &String::from_str(&env, "esc-001"), &true);
 
-    assert_eq!(TokenClient::new(&env, &token).balance(&beneficiary), 5_000);
-    assert_eq!(TokenClient::new(&env, &token).balance(&contract_id), 0);
+    let token_client = TokenClient::new(&env, &token);
+    // Same fee split applies when a dispute is resolved in the beneficiary's favour.
+    assert_eq!(token_client.balance(&beneficiary), 4_875);
+    assert_eq!(token_client.balance(&admin), 125);
+    assert_eq!(token_client.balance(&contract_id), 0);
 
     let escrow = client.get_escrow(&String::from_str(&env, "esc-001"));
     assert_eq!(escrow.status, EscrowStatus::Released);
     assert!(escrow.resolved_at.is_some());
 }
-
 
 #[test]
 fn test_initialize_rejects_fee_bps_above_10000() {
@@ -510,7 +558,7 @@ fn test_set_fee_recipient_rejects_unauthorized_caller() {
     let result = client.try_set_fee_recipient(&unauthorized, &new_recipient);
 
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
-    assert_eq!(client.fee_recipient(), Ok(original_recipient));
+    assert_eq!(client.fee_recipient(), original_recipient);
 }
 
 #[test]
@@ -527,5 +575,5 @@ fn test_set_fee_recipient_accepts_admin() {
     client.set_fee_recipient(&admin, &original_recipient);
     client.set_fee_recipient(&admin, &new_recipient);
 
-    assert_eq!(client.fee_recipient(), Ok(new_recipient));
+    assert_eq!(client.fee_recipient(), new_recipient);
 }
