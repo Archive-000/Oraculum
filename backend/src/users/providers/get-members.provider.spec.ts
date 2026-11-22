@@ -30,6 +30,7 @@ function buildQueryBuilderStub(
     skip: jest.fn().mockReturnThis(),
     take: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    addOrderBy: jest.fn().mockReturnThis(),
     getCount: jest.fn().mockResolvedValue(0),
     getMany: jest.fn().mockResolvedValue([]),
   };
@@ -228,6 +229,33 @@ describe('GetMembersProvider (BE-18 — bounded member-list query parameters)', 
       } as unknown as MemberQueryDto);
 
       expect(qb.andWhere).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ordering (#859 stable pagination)', () => {
+    it('sorts by newest first and breaks ties with the unique id', async () => {
+      await provider.getMembers({} as MemberQueryDto);
+
+      expect(qb.orderBy).toHaveBeenCalledTimes(1);
+      expect(qb.orderBy).toHaveBeenCalledWith('user.createdAt', 'DESC');
+      expect(qb.addOrderBy).toHaveBeenCalledTimes(1);
+      expect(qb.addOrderBy).toHaveBeenCalledWith('user.id', 'DESC');
+    });
+
+    it('applies the tie-breaker after the primary sort key', async () => {
+      await provider.getMembers({} as MemberQueryDto);
+
+      const primary = qb.orderBy.mock.invocationCallOrder[0];
+      const tieBreaker = qb.addOrderBy.mock.invocationCallOrder[0];
+      expect(primary).toBeLessThan(tieBreaker);
+    });
+
+    it('keeps the same ordering for tombstone listings and later pages', async () => {
+      await provider.getMembers({ page: 3, limit: 10 } as MemberQueryDto, true);
+
+      expect(qb.orderBy).toHaveBeenCalledWith('user.createdAt', 'DESC');
+      expect(qb.addOrderBy).toHaveBeenCalledWith('user.id', 'DESC');
+      expect(qb.skip).toHaveBeenCalledWith(20);
     });
   });
 
