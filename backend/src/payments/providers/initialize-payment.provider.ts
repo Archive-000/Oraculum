@@ -16,6 +16,36 @@ import { User } from '../../users/entities/user.entity';
 import { runInTransaction } from '../../common/utils/run-in-transaction';
 
 /**
+ * Validates a booking total before it is sent to the payment provider (#860).
+ *
+ * Amounts are held in kobo, the smallest unit Paystack accepts, so the only
+ * supported precision is a whole number. The column is a bigint, which the
+ * driver returns as a numeric string, so digit-only strings are accepted and
+ * everything else (fractions, signs, exponents, blanks, NaN, Infinity,
+ * values beyond Number.MAX_SAFE_INTEGER) is rejected before any payment row
+ * or provider request is created.
+ */
+export function assertValidPaymentAmount(
+  raw: unknown,
+  bookingId: string,
+): number {
+  let amount = Number.NaN;
+  if (typeof raw === 'number') {
+    amount = raw;
+  } else if (typeof raw === 'string' && /^\d+$/.test(raw)) {
+    amount = Number(raw);
+  }
+
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    throw new BadRequestException(
+      `Booking "${bookingId}" has an invalid payment amount. ` +
+        'The amount must be a positive whole number of kobo.',
+    );
+  }
+  return amount;
+}
+
+/**
  * Initializes a payment for a booking (BE-12 acceptance).
  *
  * The Payment row creation and the Paystack reference back-fill are
@@ -56,6 +86,9 @@ export class InitializePaymentProvider {
       );
     }
 
+    // Reject unusable amounts before touching the database or Paystack.
+    const amount = assertValidPaymentAmount(booking.totalAmount, bookingId);
+
     // Re-use the existing pending payment if one exists. This is the
     // typical "user clicked pay → cancelled → clicked pay again" path.
     const existing = await this.paymentsRepository.findOne({
@@ -72,7 +105,7 @@ export class InitializePaymentProvider {
       }
       const paystackData = await this.paystackProvider.initializeTransaction(
         user.email,
-        Number(booking.totalAmount),
+        amount,
         existing.id,
         this.configService.get('FRONTEND_PAYMENT_CALLBACK_URL'),
         { bookingId },
@@ -95,7 +128,7 @@ export class InitializePaymentProvider {
       const payment = manager.create(Payment, {
         bookingId,
         userId,
-        amount: Number(booking.totalAmount),
+        amount: amount,
         provider: PaymentProvider.PAYSTACK,
         status: PaymentStatus.PENDING,
       });
@@ -103,7 +136,7 @@ export class InitializePaymentProvider {
 
       const paystackData = await this.paystackProvider.initializeTransaction(
         user.email,
-        Number(booking.totalAmount),
+        amount,
         savedPayment.id, // use payment UUID as Paystack reference
         this.configService.get('FRONTEND_PAYMENT_CALLBACK_URL'),
         { bookingId, userId },
