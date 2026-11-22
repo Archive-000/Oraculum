@@ -1,4 +1,5 @@
 import { Module, OnModuleInit } from '@nestjs/common';
+import { CacheModule } from '@nestjs/cache-manager';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
@@ -35,6 +36,12 @@ import { AuditModule } from '../audit/audit.module';
     }),
     PassportModule,
     AuditModule,
+    // VerifyTotpProvider needs CACHE_MANAGER to remember used TOTP codes.
+    // AppModule registers its cache without isGlobal, so the token is not
+    // visible here; this local registration provides it. It uses the default
+    // in-process store until the app-level cache is made global, at which
+    // point this line should be removed so the shared store is used.
+    CacheModule.register(),
   ],
   controllers: [AuthController],
   providers: [
