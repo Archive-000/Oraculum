@@ -329,3 +329,181 @@ describe('MemberQueryDto (BE-18 — validation)', () => {
     expect(await validationErrorsFor({ sortBy: 'password' })).not.toEqual([]);
   });
 });
+
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { UpdateMemberStatusProvider } from './update-member-status.provider';
+import { AuditAction, AuditService } from '../../audit/audit.service';
+import { UserRole } from '../enums/userRoles.enum';
+
+describe('UpdateMemberStatusProvider (#858 — auditable status changes)', () => {
+  const MEMBER_ID = 'member-1';
+
+  let provider: UpdateMemberStatusProvider;
+  let repository: {
+    findOne: jest.Mock;
+    count: jest.Mock;
+    save: jest.Mock;
+  };
+  let audit: { log: jest.Mock };
+
+  const memberWith = (overrides: Partial<User> = {}): User =>
+    ({
+      id: MEMBER_ID,
+      role: UserRole.USER,
+      membershipStatus: MembershipStatus.ACTIVE,
+      isSuspended: false,
+      isActive: true,
+      memberSince: new Date('2026-01-01T00:00:00.000Z'),
+      ...overrides,
+    }) as User;
+
+  beforeEach(async () => {
+    repository = {
+      findOne: jest.fn().mockResolvedValue(memberWith()),
+      count: jest.fn().mockResolvedValue(2),
+      save: jest.fn(async (user: User) => user),
+    };
+    audit = { log: jest.fn().mockResolvedValue(null) };
+
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        UpdateMemberStatusProvider,
+        { provide: getRepositoryToken(User), useValue: repository },
+        { provide: AuditService, useValue: audit },
+      ],
+    }).compile();
+
+    provider = moduleRef.get(UpdateMemberStatusProvider);
+  });
+
+  it('records the previous and new status against the member', async () => {
+    await provider.updateStatus(MEMBER_ID, MembershipStatus.SUSPENDED);
+
+    expect(audit.log).toHaveBeenCalledTimes(1);
+    expect(audit.log).toHaveBeenCalledWith({
+      action: AuditAction.MEMBERSHIP_STATUS_CHANGED,
+      actor: undefined,
+      resourceType: 'User',
+      resourceId: MEMBER_ID,
+      metadata: {
+        previousStatus: MembershipStatus.ACTIVE,
+        status: MembershipStatus.SUSPENDED,
+      },
+    });
+  });
+
+  it('records the acting administrator when one is supplied', async () => {
+    const admin = { id: 'admin-1', email: 'admin@example.com', role: 'ADMIN' };
+
+    await provider.updateStatus(MEMBER_ID, MembershipStatus.SUSPENDED, admin);
+
+    expect(audit.log.mock.calls[0][0].actor).toBe(admin);
+  });
+
+  it('leaves the actor unset so the request user is used as the fallback', async () => {
+    await provider.updateStatus(MEMBER_ID, MembershipStatus.SUSPENDED);
+
+    const entry = audit.log.mock.calls[0][0];
+    expect(entry.actor).toBeUndefined();
+    expect(entry.actor).not.toEqual({});
+  });
+
+  it('writes the audit row only after the new status is saved', async () => {
+    await provider.updateStatus(MEMBER_ID, MembershipStatus.SUSPENDED);
+
+    expect(repository.save.mock.invocationCallOrder[0]).toBeLessThan(
+      audit.log.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('captures the status the member had before the change was applied', async () => {
+    repository.findOne.mockResolvedValue(
+      memberWith({ membershipStatus: MembershipStatus.SUSPENDED }),
+    );
+
+    await provider.updateStatus(MEMBER_ID, MembershipStatus.ACTIVE);
+
+    expect(audit.log.mock.calls[0][0].metadata).toEqual({
+      previousStatus: MembershipStatus.SUSPENDED,
+      status: MembershipStatus.ACTIVE,
+    });
+  });
+
+  it('keeps the legacy suspension flags in sync', async () => {
+    const saved = await provider.updateStatus(
+      MEMBER_ID,
+      MembershipStatus.SUSPENDED,
+    );
+
+    expect(saved.membershipStatus).toBe(MembershipStatus.SUSPENDED);
+    expect(saved.isSuspended).toBe(true);
+    expect(saved.isActive).toBe(false);
+  });
+
+  it('stamps memberSince the first time a member is activated', async () => {
+    repository.findOne.mockResolvedValue(
+      memberWith({
+        membershipStatus: MembershipStatus.SUSPENDED,
+        memberSince: undefined as unknown as Date,
+      }),
+    );
+
+    const saved = await provider.updateStatus(
+      MEMBER_ID,
+      MembershipStatus.ACTIVE,
+    );
+
+    expect(saved.memberSince).toBeInstanceOf(Date);
+  });
+
+  it('writes no audit row and saves nothing for an unknown member', async () => {
+    repository.findOne.mockResolvedValue(null);
+
+    await expect(
+      provider.updateStatus(MEMBER_ID, MembershipStatus.SUSPENDED),
+    ).rejects.toThrow(NotFoundException);
+
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(audit.log).not.toHaveBeenCalled();
+  });
+
+  describe('last super-admin protection', () => {
+    it('refuses to suspend the only super-admin and audits nothing', async () => {
+      repository.findOne.mockResolvedValue(
+        memberWith({ role: UserRole.SUPER_ADMIN }),
+      );
+      repository.count.mockResolvedValue(1);
+
+      await expect(
+        provider.updateStatus(MEMBER_ID, MembershipStatus.SUSPENDED),
+      ).rejects.toThrow(ForbiddenException);
+
+      expect(repository.save).not.toHaveBeenCalled();
+      expect(audit.log).not.toHaveBeenCalled();
+    });
+
+    it('allows suspending a super-admin when another one remains', async () => {
+      repository.findOne.mockResolvedValue(
+        memberWith({ role: UserRole.SUPER_ADMIN }),
+      );
+      repository.count.mockResolvedValue(2);
+
+      await expect(
+        provider.updateStatus(MEMBER_ID, MembershipStatus.SUSPENDED),
+      ).resolves.toMatchObject({
+        membershipStatus: MembershipStatus.SUSPENDED,
+      });
+      expect(audit.log).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not count super-admins when the status stays active', async () => {
+      repository.findOne.mockResolvedValue(
+        memberWith({ role: UserRole.SUPER_ADMIN }),
+      );
+
+      await provider.updateStatus(MEMBER_ID, MembershipStatus.ACTIVE);
+
+      expect(repository.count).not.toHaveBeenCalled();
+    });
+  });
+});
