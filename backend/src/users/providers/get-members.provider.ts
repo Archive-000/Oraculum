@@ -101,6 +101,10 @@ export class GetMembersProvider {
       .skip((page - 1) * limit)
       .take(limit)
       .orderBy('user.createdAt', 'DESC')
+      // createdAt is not unique, so members created in the same instant
+      // would otherwise swap places between queries and could repeat or
+      // vanish across page boundaries. The primary key breaks the tie.
+      .addOrderBy('user.id', 'DESC')
       .getMany();
 
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };

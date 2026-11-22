@@ -154,7 +154,6 @@ describe('PaymentsService', () => {
   });
 });
 
-
 describe('payment query validation', () => {
   const errorsFor = async (plain: Record<string, unknown>) =>
     (await validate(plainToInstance(PaymentQuery, plain))).map(
@@ -306,5 +305,183 @@ describe('BE-47 refund arithmetic', () => {
 
   it('rejects non-integer minor units', () => {
     expect(() => toMinorUnits(10.5)).toThrow(BadRequestException);
+  });
+});
+
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { ConfigService } from '@nestjs/config';
+import { DataSource } from 'typeorm';
+import { PaystackProvider } from './providers/paystack.provider';
+import { Booking } from '../bookings/entities/booking.entity';
+import { BookingStatus } from '../bookings/enums/booking-status.enum';
+import { User } from '../users/entities/user.entity';
+import { assertValidPaymentAmount } from './providers/initialize-payment.provider';
+
+describe('InitializePaymentProvider amount validation (#860)', () => {
+  const BOOKING_ID = 'booking-1';
+  const USER_ID = 'user-1';
+
+  let provider: InitializePaymentProvider;
+  let paymentsRepository: { findOne: jest.Mock };
+  let bookingsRepository: { findOne: jest.Mock };
+  let usersRepository: { findOne: jest.Mock };
+  let paystack: { initializeTransaction: jest.Mock };
+  let dataSource: { createQueryRunner: jest.Mock };
+  let manager: { create: jest.Mock; save: jest.Mock };
+
+  const bookingWith = (totalAmount: unknown) => ({
+    id: BOOKING_ID,
+    userId: USER_ID,
+    status: BookingStatus.PENDING,
+    totalAmount,
+  });
+
+  beforeEach(async () => {
+    paymentsRepository = { findOne: jest.fn().mockResolvedValue(null) };
+    bookingsRepository = { findOne: jest.fn() };
+    usersRepository = {
+      findOne: jest.fn().mockResolvedValue({ id: USER_ID, email: 'a@b.co' }),
+    };
+    paystack = {
+      initializeTransaction: jest.fn().mockResolvedValue({
+        authorization_url: 'https://pay.test/auth',
+        reference: 'ref-1',
+      }),
+    };
+    manager = {
+      create: jest.fn((_entity: unknown, data: object) => ({ ...data })),
+      save: jest.fn(async (payment: object) => ({ id: 'pay-1', ...payment })),
+    };
+    dataSource = {
+      createQueryRunner: jest.fn().mockReturnValue({
+        connect: jest.fn(),
+        startTransaction: jest.fn(),
+        commitTransaction: jest.fn(),
+        rollbackTransaction: jest.fn(),
+        release: jest.fn(),
+        manager,
+      }),
+    };
+
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        InitializePaymentProvider,
+        { provide: getRepositoryToken(Payment), useValue: paymentsRepository },
+        { provide: getRepositoryToken(Booking), useValue: bookingsRepository },
+        { provide: getRepositoryToken(User), useValue: usersRepository },
+        { provide: PaystackProvider, useValue: paystack },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
+        { provide: DataSource, useValue: dataSource },
+      ],
+    }).compile();
+
+    provider = moduleRef.get(InitializePaymentProvider);
+  });
+
+  const invalidAmounts: Array<[string, unknown]> = [
+    ['zero', 0],
+    ['negative', -5000],
+    ['fractional kobo', 1500.5],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['beyond the safe integer range', Number.MAX_SAFE_INTEGER + 2],
+    ['null', null],
+    ['undefined', undefined],
+    ['empty string', ''],
+    ['blank string', '   '],
+    ['negative numeric string', '-5000'],
+    ['decimal numeric string', '1500.50'],
+    ['exponent string', '1e3'],
+    ['non numeric string', '12abc'],
+    ['zero string', '0'],
+    ['unsafe numeric string', '9007199254740993'],
+    ['boolean', true],
+    ['object', {}],
+  ];
+
+  describe.each(invalidAmounts)(
+    'when the booking amount is %s',
+    (_label, raw) => {
+      it('rejects a new payment before any provider request or write', async () => {
+        bookingsRepository.findOne.mockResolvedValue(bookingWith(raw));
+
+        await expect(provider.initialize(BOOKING_ID, USER_ID)).rejects.toThrow(
+          BadRequestException,
+        );
+
+        expect(paystack.initializeTransaction).not.toHaveBeenCalled();
+        expect(dataSource.createQueryRunner).not.toHaveBeenCalled();
+        expect(paymentsRepository.findOne).not.toHaveBeenCalled();
+      });
+
+      it('rejects when a pending payment already exists', async () => {
+        bookingsRepository.findOne.mockResolvedValue(bookingWith(raw));
+        paymentsRepository.findOne.mockResolvedValue({ id: 'pay-existing' });
+
+        await expect(provider.initialize(BOOKING_ID, USER_ID)).rejects.toThrow(
+          BadRequestException,
+        );
+
+        expect(paystack.initializeTransaction).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  it('does not leak the rejected amount in the error message', () => {
+    expect.assertions(2);
+    try {
+      assertValidPaymentAmount(-123456, BOOKING_ID);
+    } catch (error) {
+      const message = (error as Error).message;
+      expect(message).toContain(BOOKING_ID);
+      expect(message).not.toContain('123456');
+    }
+  });
+
+  it('accepts a positive whole number of kobo', () => {
+    expect(assertValidPaymentAmount(250_000, BOOKING_ID)).toBe(250_000);
+    expect(assertValidPaymentAmount(1, BOOKING_ID)).toBe(1);
+    expect(assertValidPaymentAmount(Number.MAX_SAFE_INTEGER, BOOKING_ID)).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it('accepts the digit-only string a bigint column returns', async () => {
+    bookingsRepository.findOne.mockResolvedValue(bookingWith('250000'));
+
+    const result = await provider.initialize(BOOKING_ID, USER_ID);
+
+    expect(paystack.initializeTransaction).toHaveBeenCalledWith(
+      'a@b.co',
+      250_000,
+      'pay-1',
+      undefined,
+      { bookingId: BOOKING_ID, userId: USER_ID },
+    );
+    expect(manager.create).toHaveBeenCalledWith(
+      Payment,
+      expect.objectContaining({ amount: 250_000 }),
+    );
+    expect(result).toEqual({
+      paymentId: 'pay-1',
+      authorizationUrl: 'https://pay.test/auth',
+      reference: 'ref-1',
+    });
+  });
+
+  it('sends the validated amount when refreshing an existing pending payment', async () => {
+    bookingsRepository.findOne.mockResolvedValue(bookingWith('90000'));
+    paymentsRepository.findOne.mockResolvedValue({ id: 'pay-existing' });
+
+    const result = await provider.initialize(BOOKING_ID, USER_ID);
+
+    expect(paystack.initializeTransaction).toHaveBeenCalledWith(
+      'a@b.co',
+      90_000,
+      'pay-existing',
+      undefined,
+      { bookingId: BOOKING_ID },
+    );
+    expect(result.paymentId).toBe('pay-existing');
   });
 });
