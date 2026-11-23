@@ -126,6 +126,7 @@ describe('HandleWebhookProvider booking-payment confirmation', () => {
         planType: PlanType.DAILY,
         status: BookingStatus.PENDING,
         endDate: '2026-09-01',
+        createdAt: new Date(),
       } as Booking,
       user: {
         id: userId,

@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { LessThan, Repository } from 'typeorm';
 import { Booking } from '../entities/booking.entity';
 import { BookingStatus } from '../enums/booking-status.enum';
+import { RESERVATION_EXPIRY_MS } from './reservation-expiry.constants';
 
 /**
  * Expires stale pending reservations on a schedule.
@@ -25,17 +26,12 @@ export class ReservationExpiryHandler {
 
   @Cron(CronExpression.EVERY_30_MINUTES)
   async expireStaleReservations(): Promise<void> {
-    const boundary = new Date(Date.now() - 30 * 60 * 1000);
-    const staleReservations = await this.bookingsRepository.find({
-      where: { status: BookingStatus.PENDING, createdAt: LessThan(boundary) },
-    });
-    if (staleReservations.length === 0) return;
-
-    staleReservations.forEach((booking) => {
-      booking.status = BookingStatus.CANCELLED;
-    });
-    await this.bookingsRepository.save(staleReservations);
-
-    this.logger.log(`Expired ${staleReservations.length} stale reservation(s)`);
+    const boundary = new Date(Date.now() - RESERVATION_EXPIRY_MS);
+    const result = await this.bookingsRepository.update(
+      { status: BookingStatus.PENDING, createdAt: LessThan(boundary) },
+      { status: BookingStatus.CANCELLED },
+    );
+    if (!result.affected) return;
+    this.logger.log(`Expired ${result.affected} stale reservation(s)`);
   }
 }

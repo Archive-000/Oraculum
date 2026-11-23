@@ -97,6 +97,18 @@ describe('PricingService', () => {
       const gross = 1000 * 8 * 264 * 1; // YEARLY = 264 fixed days
       expect(amount).toBe(Math.floor(gross * (1 - 0.2)));
     });
+
+    it('rounds discounted fractional kobo down deterministically', () => {
+      expect(
+        service.calculateAmount(
+          1,
+          PlanType.MONTHLY,
+          1,
+          '2026-01-01',
+          '2026-02-01',
+        ),
+      ).toBe(158);
+    });
   });
 
   describe('getPlanSummary', () => {
