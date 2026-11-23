@@ -1,7 +1,16 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { DeadLetterJob } from '../entities/dead-letter-job.entity';
+
+const RETRIED_STATUS = 'retried';
+/** Statuses from which a dead-letter job may be retried. */
+const RETRYABLE_STATUSES = ['pending', 'failed'];
 
 @Injectable()
 export class DeadLetterProvider {
@@ -65,10 +74,55 @@ export class DeadLetterProvider {
   }
 
   async updateStatus(id: string, status: string): Promise<void> {
+    if (status === RETRIED_STATUS) {
+      await this.recordRetry(id);
+      return;
+    }
+
     await this.deadLetterRepository.update(id, {
       status,
       retriedAt: new Date(),
     });
+  }
+
+  /**
+   * Records a retry attempt. The status change and the attempt increment
+   * happen in a single conditional UPDATE so that:
+   *  - `totalAttempts` is incremented exactly once per accepted retry,
+   *    even when concurrent retry requests race each other;
+   *  - a rejected retry (unknown job or non-retryable status) leaves
+   *    `totalAttempts` untouched.
+   */
+  async recordRetry(id: string): Promise<void> {
+    const now = new Date();
+
+    const result = await this.deadLetterRepository
+      .createQueryBuilder()
+      .update(DeadLetterJob)
+      .set({
+        status: RETRIED_STATUS,
+        retriedAt: now,
+        lastAttemptAt: now,
+        totalAttempts: () => '"totalAttempts" + 1',
+      })
+      .where('id = :id', { id })
+      .andWhere('status IN (:...retryable)', {
+        retryable: RETRYABLE_STATUSES,
+      })
+      .execute();
+
+    if ((result.affected ?? 0) === 1) {
+      return;
+    }
+
+    const existing = await this.deadLetterRepository.findOne({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException(`Dead-letter job "${id}" not found`);
+    }
+
+    throw new ConflictException(
+      `Dead-letter job "${id}" cannot be retried from status "${existing.status}"`,
+    );
   }
 
   async remove(id: string): Promise<void> {
