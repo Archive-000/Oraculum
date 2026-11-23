@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan } from 'typeorm';
+import { Repository, LessThanOrEqual } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { IdempotencyKey } from '../entities/idempotency-key.entity';
 
@@ -19,11 +19,22 @@ export class IdempotencyCleanupService {
     private readonly repo: Repository<IdempotencyKey>,
   ) {}
 
+  /**
+   * A record is expired — and therefore reusable — once the current time
+   * is at or past its `expiresAt`. The boundary is inclusive so a key whose
+   * expiry equals "now" is released rather than lingering until the next
+   * run.
+   */
+  static isExpired(expiresAt: Date | null | undefined, now: Date = new Date()): boolean {
+    if (!expiresAt) return false;
+    return expiresAt.getTime() <= now.getTime();
+  }
+
   @Cron(CronExpression.EVERY_HOUR)
-  async cleanup() {
+  async cleanup(now: Date = new Date()) {
     try {
       const result = await this.repo.delete({
-        expiresAt: LessThan(new Date()),
+        expiresAt: LessThanOrEqual(now),
       });
       const count = result.affected ?? 0;
       if (count > 0) {
