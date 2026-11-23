@@ -117,3 +117,71 @@ describe('InvoiceCalculator Edge Cases & Regression Tests (#56 BE-47)', () => {
     });
   });
 });
+
+describe('InvoiceCalculator normalized line items (#867)', () => {
+  it('returns a zero breakdown for an empty invoice', () => {
+    expect(InvoiceCalculator.calculate({ lineItems: [] })).toEqual({
+      subtotalCents: 0,
+      proratedSubtotalCents: 0,
+      discountCents: 0,
+      taxableAmountCents: 0,
+      taxCents: 0,
+      totalCents: 0,
+    });
+  });
+
+  it('rounds fractional quantities per line before summing the subtotal', () => {
+    const result = InvoiceCalculator.calculate({
+      lineItems: [
+        { description: 'Half-cent line', unitAmountCents: 1001, quantity: 1.5 },
+        { description: 'Fractional addon', unitAmountCents: 333, quantity: 0.5 },
+      ],
+    });
+
+    expect(result.subtotalCents).toBe(1669);
+    expect(result.proratedSubtotalCents).toBe(1669);
+    expect(result.totalCents).toBe(1669);
+  });
+
+  it('calculates tax independently for mixed-rate invoice lines', () => {
+    const result = InvoiceCalculator.calculate({
+      lineItems: [
+        { description: 'Standard rate', unitAmountCents: 10000, quantity: 1, taxRatePercent: 10 },
+        { description: 'Reduced rate', unitAmountCents: 10000, quantity: 1, taxRatePercent: 5 },
+      ],
+    });
+
+    expect(result.subtotalCents).toBe(20000);
+    expect(result.taxableAmountCents).toBe(20000);
+    expect(result.taxCents).toBe(1500);
+    expect(result.totalCents).toBe(21500);
+  });
+
+  it('allocates invoice discounts across mixed-rate lines before calculating tax', () => {
+    const result = InvoiceCalculator.calculate({
+      lineItems: [
+        { description: 'Standard rate', unitAmountCents: 10000, quantity: 1, taxRatePercent: 10 },
+        { description: 'Reduced rate', unitAmountCents: 10000, quantity: 1, taxRatePercent: 5 },
+      ],
+      discount: { type: 'PERCENTAGE', value: 50 },
+    });
+
+    expect(result.discountCents).toBe(10000);
+    expect(result.taxableAmountCents).toBe(10000);
+    expect(result.taxCents).toBe(750);
+    expect(result.totalCents).toBe(10750);
+  });
+
+  it('rejects invalid monetary and quantity inputs instead of producing NaN totals', () => {
+    expect(() =>
+      InvoiceCalculator.calculate({
+        lineItems: [{ description: 'Invalid', unitAmountCents: Number.NaN, quantity: 1 }],
+      }),
+    ).toThrow(/unitAmountCents/);
+    expect(() =>
+      InvoiceCalculator.calculate({
+        lineItems: [{ description: 'Invalid', unitAmountCents: 100, quantity: -1 }],
+      }),
+    ).toThrow(/quantity/);
+  });
+});
