@@ -12,6 +12,7 @@ import { User } from '../../users/entities/user.entity';
 import { MembershipStatus } from '../../users/enums/membership-status.enum';
 import { runInTransaction } from '../../common/utils/run-in-transaction';
 import { CacheInvalidationProvider } from '../../common/providers/cache-invalidation.provider';
+import { RESERVATION_EXPIRY_MS } from './reservation-expiry.constants';
 
 /**
  * Confirms a booking and — atomically — promotes the user to ACTIVE on
@@ -39,10 +40,12 @@ export class ConfirmBookingProvider {
   async confirm(
     bookingId: string,
     passedManager?: EntityManager,
+    now: Date = new Date(),
   ): Promise<Booking> {
     const work = async (manager: EntityManager): Promise<Booking> => {
       const booking = await manager.findOne(Booking, {
         where: { id: bookingId },
+        lock: { mode: 'pessimistic_write' },
       });
       if (!booking) {
         throw new NotFoundException(`Booking "${bookingId}" not found`);
@@ -54,6 +57,13 @@ export class ConfirmBookingProvider {
       }
       if (booking.status !== BookingStatus.PENDING) {
         throw new BadRequestException('Only PENDING bookings can be confirmed');
+      }
+      if (
+        booking.createdAt.getTime() < now.getTime() - RESERVATION_EXPIRY_MS
+      ) {
+        throw new BadRequestException(
+          'Reservation has expired and cannot be confirmed',
+        );
       }
 
       booking.status = BookingStatus.CONFIRMED;

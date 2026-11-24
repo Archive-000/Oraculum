@@ -107,7 +107,11 @@ describe('BookingsService.createRecurring (BE-29 atomic series)', () => {
     };
     const { transaction, manager, provider } = buildHarness(state);
 
-    const result = await provider.createRecurring(baseDto() as never, USER_ID);
+    const result = await provider.createRecurring(
+      baseDto() as never,
+      USER_ID,
+      new Date('2026-03-01T00:00:00Z'),
+    );
 
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(result).toHaveLength(3);
@@ -133,9 +137,13 @@ describe('BookingsService.createRecurring (BE-29 atomic series)', () => {
     };
     const { transaction, manager, provider } = buildHarness(state);
 
-    await expect(provider.createRecurring(baseDto() as never, USER_ID)).rejects.toBeInstanceOf(
-      RecurringBookingConflictException,
-    );
+    await expect(
+      provider.createRecurring(
+        baseDto() as never,
+        USER_ID,
+        new Date('2026-03-01T00:00:00Z'),
+      ),
+    ).rejects.toBeInstanceOf(RecurringBookingConflictException);
 
     // Single transaction boundary, and save never ran => nothing persisted.
     expect(transaction).toHaveBeenCalledTimes(1);
@@ -155,7 +163,11 @@ describe('BookingsService.createRecurring (BE-29 atomic series)', () => {
 
     // seatCount=2, booked=9, total=10 => only 1 available at occurrence index 1
     const err = await provider
-      .createRecurring(baseDto({ seatCount: 2 }) as never, USER_ID)
+      .createRecurring(
+        baseDto({ seatCount: 2 }) as never,
+        USER_ID,
+        new Date('2026-03-01T00:00:00Z'),
+      )
       .catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(RecurringBookingConflictException);

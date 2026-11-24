@@ -225,6 +225,50 @@ describe('CreateBookingProvider interval overlap checks', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('rejects recurring bookings with invalid or non-increasing end dates before opening a transaction', async () => {
+    const transaction = jest.fn();
+    const provider = new CreateBookingProvider(
+      {} as never,
+      {} as never,
+      {} as never,
+      { transaction } as never,
+      {} as never,
+      {} as never,
+    );
+
+    await expect(
+      provider.createRecurring(
+        {
+          workspaceId: 'workspace-1',
+          planType: 'hourly' as never,
+          startDate: '2026-02-30',
+          endDate: '2026-03-01',
+          seatCount: 1,
+          recurrenceFrequency: 'weekly' as never,
+          occurrenceCount: 2,
+        },
+        'user-1',
+        FIXED_NOW,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      provider.createRecurring(
+        {
+          workspaceId: 'workspace-1',
+          planType: 'hourly' as never,
+          startDate: '2026-10-17',
+          endDate: '2026-10-17',
+          seatCount: 1,
+          recurrenceFrequency: 'weekly' as never,
+          occurrenceCount: 2,
+        },
+        'user-1',
+        FIXED_NOW,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
   it('rejects a start date that is already past in the configured timezone', async () => {
     process.env.BOOKING_TIMEZONE = 'Africa/Lagos';
     const transaction = jest.fn();

@@ -51,6 +51,14 @@ function startDateIsInPast(startDate: string, now: Date): boolean {
   return Number.isFinite(startMs) && startMs < now.getTime();
 }
 
+function isValidDateOnly(value: string): boolean {
+  if (!DATE_ONLY_PATTERN.test(value)) {
+    return false;
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 @Injectable()
 export class CreateBookingProvider {
   private readonly logger = new Logger(CreateBookingProvider.name);
@@ -171,8 +179,14 @@ export class CreateBookingProvider {
     userId: string,
     now: Date = new Date(),
   ): Promise<Booking[]> {
-    if (new Date(dto.endDate) <= new Date(dto.startDate)) {
-      throw new BadRequestException('endDate must be after startDate');
+    if (
+      !isValidDateOnly(dto.startDate) ||
+      !isValidDateOnly(dto.endDate) ||
+      dto.endDate <= dto.startDate
+    ) {
+      throw new BadRequestException(
+        'startDate and endDate must be valid dates, and endDate must be after startDate',
+      );
     }
     if (startDateIsInPast(dto.startDate, now)) {
       throw new BadRequestException('startDate cannot be in the past');
@@ -288,6 +302,15 @@ export function expandRecurringOccurrences(
   frequency: RecurrenceFrequency,
   count: number,
 ): Array<{ startDate: string; endDate: string }> {
+  if (
+    !isValidDateOnly(startDate) ||
+    !isValidDateOnly(endDate) ||
+    endDate <= startDate
+  ) {
+    throw new BadRequestException(
+      'startDate and endDate must be valid dates, and endDate must be after startDate',
+    );
+  }
   const start = new Date(startDate);
   const end = new Date(endDate);
   const out: Array<{ startDate: string; endDate: string }> = [];

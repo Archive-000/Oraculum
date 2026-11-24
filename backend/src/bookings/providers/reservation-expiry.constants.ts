@@ -1,0 +1,1 @@
+export const RESERVATION_EXPIRY_MS = 30 * 60 * 1000;

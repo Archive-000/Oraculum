@@ -41,17 +41,12 @@ export class PricingService {
     startDate: string,
     endDate: string,
   ): number {
-    if (hourlyRateKobo < 0) {
-      throw new Error('Hourly rate cannot be negative');
+    if (!Number.isSafeInteger(hourlyRateKobo) || hourlyRateKobo < 0) {
+      throw new Error('Hourly rate must be a non-negative safe integer');
     }
 
-    if (seatCount < 0) {
-      throw new Error('Seat count cannot be negative');
-    }
-
-    const discount = PLAN_DISCOUNT[planType];
-    if (discount < 0) {
-      throw new Error('Discount cannot be negative');
+    if (!Number.isSafeInteger(seatCount) || seatCount < 0) {
+      throw new Error('Seat count must be a non-negative safe integer');
     }
 
     let days: number;
@@ -65,10 +60,17 @@ export class PricingService {
       days = PLAN_DAYS[planType];
     }
 
-    const gross = hourlyRateKobo * PLAN_WORKING_HOURS * days * seatCount;
-    return Math.floor(gross * (1 - discount));
-    const discountPct = PLAN_DISCOUNT_PCT[planType];
-    return Math.floor((gross * (100 - discountPct)) / 100);
+    const gross =
+      BigInt(hourlyRateKobo) *
+      BigInt(PLAN_WORKING_HOURS) *
+      BigInt(days) *
+      BigInt(seatCount);
+    const discountPct = BigInt(PLAN_DISCOUNT_PCT[planType]);
+    const amount = (gross * (100n - discountPct)) / 100n;
+    if (amount > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error('Calculated booking amount exceeds the safe integer range');
+    }
+    return Number(amount);
   }
 
   getPlanSummary(planType: PlanType): { days: number; discountPct: number } {
