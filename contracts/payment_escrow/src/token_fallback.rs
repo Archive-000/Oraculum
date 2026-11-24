@@ -1,6 +1,6 @@
 // contracts/payment_escrow/src/token_fallback.rs
 
-use soroban_sdk::{contracterror, contracttype, token, Address, Env, IntoVal, String};
+use soroban_sdk::{contracterror, contracttype, symbol_short, Address, Env, IntoVal, String};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -130,7 +130,9 @@ impl TokenFallbackHandler {
     /// Attempt a token transfer with fallback handling.
     ///
     /// On any error the function returns a clear `Err` — no partial state is
-    /// mutated.
+    /// mutated. Both the balance probe and the transfer itself run through
+    /// `try_invoke_contract`, so a token that traps on either call produces
+    /// an `Err` instead of aborting the caller.
     pub fn try_transfer_with_fallback(
         env: &Env,
         token: &Address,
@@ -145,10 +147,15 @@ impl TokenFallbackHandler {
 
         Self::require_supported_token(env, token)?;
 
-        let client = token::Client::new(env, token);
-
         // Check balance first
-        let balance = client.balance(from);
+        let balance = match env.try_invoke_contract::<i128, soroban_sdk::Error>(
+            token,
+            &symbol_short!("balance"),
+            (from.clone(),).into_val(env),
+        ) {
+            Ok(Ok(balance)) => balance,
+            _ => return Err(UnsupportedTokenError::TransferFailed),
+        };
         if balance < *amount {
             return Err(UnsupportedTokenError::InsufficientBalance);
         }
@@ -156,7 +163,7 @@ impl TokenFallbackHandler {
         // Perform the transfer
         let result = env.try_invoke_contract::<(), soroban_sdk::Error>(
             token,
-            &soroban_sdk::symbol_short!("transfer"),
+            &symbol_short!("transfer"),
             (from.clone(), to.clone(), *amount).into_val(env),
         );
 
@@ -164,5 +171,23 @@ impl TokenFallbackHandler {
             Ok(Ok(())) => Ok(()),
             _ => Err(UnsupportedTokenError::TransferFailed),
         }
+    }
+
+    /// Move `amount` and only then record the escrow as settled.
+    ///
+    /// `mark_settled` runs strictly after the transfer has succeeded, so a
+    /// rejected transfer can never leave an escrow marked as settled while
+    /// its funds are still held.
+    pub fn transfer_then_settle<F: FnOnce()>(
+        env: &Env,
+        token: &Address,
+        from: &Address,
+        to: &Address,
+        amount: &i128,
+        mark_settled: F,
+    ) -> Result<(), UnsupportedTokenError> {
+        Self::try_transfer_with_fallback(env, token, from, to, amount)?;
+        mark_settled();
+        Ok(())
     }
 }
