@@ -6,7 +6,7 @@
 [![Soroban](https://img.shields.io/badge/Contracts-Soroban-7D00FF?style=flat-square)](https://soroban.stellar.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Active%20Development-green?style=flat-square)]()
-
+A
 ---..
 ## What is Oraculum?
 
