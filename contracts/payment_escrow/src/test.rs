@@ -577,3 +577,120 @@ fn test_set_fee_recipient_accepts_admin() {
 
     assert_eq!(client.fee_recipient(), new_recipient);
 }
+
+// ── Dispute deadline boundary ─────────────────────────────────────────────────
+
+fn escrow_with_window(env: &Env, created_at: u64, dispute_window: u64) -> Escrow {
+    Escrow {
+        id: String::from_str(env, "esc-boundary"),
+        depositor: Address::generate(env),
+        beneficiary: Address::generate(env),
+        amount: 1_000,
+        payment_token: Address::generate(env),
+        status: EscrowStatus::Pending,
+        description: String::from_str(env, "Boundary"),
+        created_at,
+        release_after: 0,
+        dispute_window,
+        dispute_raised_at: None,
+        resolved_at: None,
+        fee_recipient: Address::generate(env),
+        fee_bps: 0,
+        fee_amount: 0,
+    }
+}
+
+fn create_boundary_escrow<'a>(
+    env: &'a Env,
+) -> (PaymentEscrowContractClient<'a>, Address) {
+    let admin = Address::generate(env);
+    let depositor = Address::generate(env);
+    let beneficiary = Address::generate(env);
+    let token = setup_token(env, &admin, &depositor, 10_000);
+    let contract_id = setup_contract(env);
+    let client = init(env, &contract_id, &admin, &token);
+    client.create_escrow(
+        &depositor,
+        &String::from_str(env, "esc-001"),
+        &beneficiary,
+        &5_000i128,
+        &String::from_str(env, "Deposit"),
+        &0u64,
+    );
+    (client, depositor)
+}
+
+#[test]
+fn test_raise_dispute_at_exact_deadline_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, depositor) = create_boundary_escrow(&env);
+
+    // created_at + dispute_window is the last accepted timestamp.
+    advance_time(&env, DISPUTE_WINDOW);
+    client.raise_dispute(&depositor, &String::from_str(&env, "esc-001"));
+
+    let escrow = client.get_escrow(&String::from_str(&env, "esc-001"));
+    assert_eq!(escrow.status, EscrowStatus::Disputed);
+    assert_eq!(escrow.dispute_raised_at, Some(escrow.created_at + DISPUTE_WINDOW));
+}
+
+#[test]
+fn test_raise_dispute_one_second_before_deadline_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, depositor) = create_boundary_escrow(&env);
+
+    advance_time(&env, DISPUTE_WINDOW - 1);
+    client.raise_dispute(&depositor, &String::from_str(&env, "esc-001"));
+
+    let escrow = client.get_escrow(&String::from_str(&env, "esc-001"));
+    assert_eq!(escrow.status, EscrowStatus::Disputed);
+}
+
+#[test]
+fn test_raise_dispute_one_second_after_deadline_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, depositor) = create_boundary_escrow(&env);
+
+    advance_time(&env, DISPUTE_WINDOW + 1);
+    let result = client.try_raise_dispute(&depositor, &String::from_str(&env, "esc-001"));
+    assert_eq!(result, Err(Ok(Error::DisputeWindowClosed)));
+
+    // A rejected dispute must leave the escrow untouched.
+    let escrow = client.get_escrow(&String::from_str(&env, "esc-001"));
+    assert_eq!(escrow.status, EscrowStatus::Pending);
+    assert_eq!(escrow.dispute_raised_at, None);
+}
+
+#[test]
+fn test_is_dispute_window_open_boundaries() {
+    let env = Env::default();
+    let escrow = escrow_with_window(&env, 1_000, 500);
+
+    assert_eq!(escrow.dispute_deadline(), Some(1_500));
+    assert!(escrow.is_dispute_window_open(1_000));
+    assert!(escrow.is_dispute_window_open(1_499));
+    assert!(escrow.is_dispute_window_open(1_500), "deadline is inclusive");
+    assert!(!escrow.is_dispute_window_open(1_501));
+}
+
+#[test]
+fn test_is_dispute_window_open_false_when_disabled() {
+    let env = Env::default();
+    let escrow = escrow_with_window(&env, 1_000, 0);
+
+    assert_eq!(escrow.dispute_deadline(), None);
+    assert!(!escrow.is_dispute_window_open(1_000));
+    assert!(!escrow.is_dispute_window_open(0));
+}
+
+#[test]
+fn test_is_dispute_window_open_fails_closed_on_overflow() {
+    let env = Env::default();
+    let escrow = escrow_with_window(&env, u64::MAX, 1);
+
+    assert_eq!(escrow.dispute_deadline(), None);
+    assert!(!escrow.is_dispute_window_open(u64::MAX));
+}
