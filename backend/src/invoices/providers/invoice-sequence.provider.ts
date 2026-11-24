@@ -42,10 +42,8 @@ export function formatInvoiceNumber(sequenceValue: unknown): string {
 
 /**
  * BE-51 — Does this error mean "the invoice number I just generated is
- * already taken"? Matching on the SQLSTATE (and, when present, the
- * constraint name) is far more reliable than substring-matching the
- * driver message, which differs between `pg` versions and is not
- * guaranteed to be an `Error` instance at all.
+ * already taken"? Matching on SQLSTATE is more reliable than matching
+ * driver-specific error messages.
  */
 export function isInvoiceNumberCollision(
   error: unknown,
@@ -63,28 +61,18 @@ export function isInvoiceNumberCollision(
   }
   if (err.code === UNIQUE_VIOLATION) return true;
 
-  // Some drivers surface the violation only as a message.
   return (
     typeof err.message === 'string' &&
     err.message.toLowerCase().includes('duplicate key')
   );
 }
 
-/**
- * BE-51 — Owns the PostgreSQL sequence that backs
- * `Invoice.invoiceNumber` and hands out invoice numbers.
- *
- * `nextval()` is the only allocation primitive: it is atomic and
- * non-transactional, so two concurrent transactions can never receive
- * the same value and a rolled-back insert only burns a number (it never
- * leaves a half-written invoice behind). Uniqueness is still enforced by
- * the unique index on `invoices."invoiceNumber"`, which is what makes a
- * duplicate *visible* rather than silently corrupting the ledger.
- */
 @Injectable()
 export class InvoiceSequenceProvider implements OnApplicationBootstrap {
   private readonly logger = new Logger(InvoiceSequenceProvider.name);
   private ensured = false;
+  /** Shares one in-flight initialization among callers in this process. */
+  private ensurePromise: Promise<void> | null = null;
 
   constructor(private readonly dataSource: DataSource) {}
 
@@ -93,29 +81,41 @@ export class InvoiceSequenceProvider implements OnApplicationBootstrap {
   }
 
   /**
-   * Create the sequence if it is missing and push it past any invoice
-   * number that already exists. A database restored from a dump — or one
-   * where the sequence was created after rows had been written — would
-   * otherwise start handing out numbers that are already taken.
-   *
-   * `setval` only ever moves the sequence forward and is a single
-   * statement, so concurrent boots converge on the same value.
+   * Initialize and align the sequence once. The transaction-scoped advisory
+   * lock also serializes initialization across application instances, so a
+   * late setval from another boot cannot rewind values already handed out.
    */
   async ensureSequence(): Promise<void> {
+    if (this.ensured) return;
+    if (!this.ensurePromise) {
+      this.ensurePromise = this.initializeSequence().finally(() => {
+        this.ensurePromise = null;
+      });
+    }
+    await this.ensurePromise;
+  }
+
+  private async initializeSequence(): Promise<void> {
     try {
-      await this.dataSource.query(
-        `CREATE SEQUENCE IF NOT EXISTS ${INVOICE_NUMBER_SEQUENCE} START 1`,
-      );
-      await this.dataSource.query(
-        `SELECT setval(
-           '${INVOICE_NUMBER_SEQUENCE}',
-           GREATEST(
-             (SELECT last_value FROM ${INVOICE_NUMBER_SEQUENCE}),
-             (SELECT COALESCE(MAX(NULLIF(substring("invoiceNumber" from '[0-9]+$'), '')::bigint), 0) FROM invoices)
-           ),
-           true
-         )`,
-      );
+      await this.dataSource.transaction(async (manager) => {
+        await manager.query(
+          'SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',
+          [INVOICE_NUMBER_SEQUENCE],
+        );
+        await manager.query(
+          `CREATE SEQUENCE IF NOT EXISTS ${INVOICE_NUMBER_SEQUENCE} START 1`,
+        );
+        await manager.query(
+          `SELECT setval(
+             '${INVOICE_NUMBER_SEQUENCE}',
+             GREATEST(
+               (SELECT last_value FROM ${INVOICE_NUMBER_SEQUENCE}),
+               (SELECT COALESCE(MAX(NULLIF(substring("invoiceNumber" from '[0-9]+$'), '')::bigint), 0) FROM invoices)
+             ),
+             true
+           )`,
+        );
+      });
       this.ensured = true;
       this.logger.log(`${INVOICE_NUMBER_SEQUENCE} sequence ensured`);
     } catch (err) {
@@ -127,10 +127,7 @@ export class InvoiceSequenceProvider implements OnApplicationBootstrap {
     }
   }
 
-  /**
-   * Allocate the next invoice number. Each call consumes exactly one
-   * sequence value, so the result is never reused by another caller.
-   */
+  /** Allocate a value with PostgreSQL's atomic, non-transactional nextval(). */
   async nextInvoiceNumber(): Promise<string> {
     if (!this.ensured) {
       await this.ensureSequence();

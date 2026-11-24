@@ -99,19 +99,22 @@ describe('InvoiceSequenceProvider', () => {
       return [];
     });
 
-    provider = new InvoiceSequenceProvider({ query } as unknown as DataSource);
+    const transaction = jest.fn(async (work: (manager: { query: typeof query }) => unknown) =>
+      work({ query }),
+    );
+    provider = new InvoiceSequenceProvider({ query, transaction } as unknown as DataSource);
   });
 
   it('creates the sequence and advances it past the highest existing invoice', async () => {
     await provider.onApplicationBootstrap();
 
-    expect(query).toHaveBeenCalledTimes(2);
-    expect(query.mock.calls[0][0]).toContain(
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[0][0]).toContain('pg_advisory_xact_lock');
+    expect(query.mock.calls[1][0]).toContain(
       `CREATE SEQUENCE IF NOT EXISTS ${INVOICE_NUMBER_SEQUENCE}`,
     );
-    // The alignment statement is what stops a restored database from
-    // re-issuing numbers that already exist.
-    expect(query.mock.calls[1][0]).toContain('setval');
+    // The alignment statement is protected by the transaction-scoped lock.
+    expect(query.mock.calls[2][0]).toContain('setval');
     expect(query.mock.calls[1][0]).toContain('GREATEST');
     expect(query.mock.calls[1][0]).toContain('invoices');
   });
@@ -125,20 +128,21 @@ describe('InvoiceSequenceProvider', () => {
     );
   });
 
-  it('hands out a distinct number to every concurrent caller', async () => {
-    // No bootstrap, so the first call has to ensure the sequence itself.
+  it('shares initialization and hands out distinct numbers to concurrent callers', async () => {
     const numbers = await Promise.all(
       Array.from({ length: 25 }, () => provider.nextInvoiceNumber()),
     );
 
     expect(new Set(numbers).size).toBe(25);
+    expect(query.mock.calls.filter(([sql]) => String(sql).includes('CREATE SEQUENCE'))).toHaveLength(1);
+    expect(query.mock.calls.filter(([sql]) => String(sql).includes('pg_advisory_xact_lock'))).toHaveLength(1);
   });
 
   it('ensures the sequence lazily when bootstrap has not run', async () => {
     await provider.nextInvoiceNumber();
 
     const sql = query.mock.calls.map((call) => String(call[0]));
-    expect(sql.some((s) => s.includes('CREATE SEQUENCE'))).toBe(true);
+    expect(sql.some((s) => s.includes('pg_advisory_xact_lock'))).toBe(true);
     expect(sql.filter((s) => s.includes('CREATE SEQUENCE'))).toHaveLength(1);
   });
 

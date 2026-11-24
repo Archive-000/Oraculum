@@ -164,13 +164,33 @@ export class HandleWebhookProvider {
     providerEventId: string,
   ): Promise<void> {
     const result = await runInTransaction(this.dataSource, async (manager) => {
+      // Lock the payment row so concurrent success webhooks serialize before
+      // checking status and applying settlement side effects.
       const payment = await manager.findOne(Payment, {
         where: { providerReference: reference },
+        lock: { mode: 'pessimistic_write' },
       });
 
       if (!payment) {
         this.logger.warn(
           `charge.success: no payment found for reference ${reference}`,
+        );
+        return null;
+      }
+
+      const webhookAmount =
+        typeof data.amount === 'number'
+          ? data.amount
+          : typeof data.amount === 'string' && data.amount.trim() !== ''
+            ? Number(data.amount)
+            : Number.NaN;
+      if (
+        !Number.isSafeInteger(webhookAmount) ||
+        !Number.isSafeInteger(Number(payment.amount)) ||
+        webhookAmount !== Number(payment.amount)
+      ) {
+        this.logger.warn(
+          `charge.success: amount mismatch for payment ${payment.id}; settlement skipped`,
         );
         return null;
       }

@@ -104,7 +104,14 @@ describe('HandleWebhookProvider booking-payment confirmation', () => {
       dataSource,
     );
 
-    return { provider, dataSource, paystackProvider, auditService };
+    return {
+      provider,
+      dataSource,
+      paystackProvider,
+      auditService,
+      invoicesService,
+      notificationsService,
+    };
   }
 
   function createStore(): InMemoryStore {
@@ -163,17 +170,60 @@ describe('HandleWebhookProvider booking-payment confirmation', () => {
     };
 
     await provider.handle(
-      Buffer.from(JSON.stringify({ event: 'charge.success', data: webhookData })),
+      Buffer.from(JSON.stringify({ id: 'evt-success-1', event: 'charge.success', data: webhookData })),
       'valid-signature',
     );
 
     expect(dataSource.transaction).toHaveBeenCalledTimes(1);
     expect(store.payment.status).toBe(PaymentStatus.SUCCESS);
     expect(store.payment.paidAt).toBeInstanceOf(Date);
-    expect(store.payment.metadata).toEqual(webhookData);
+    expect(store.payment.metadata).toEqual({
+      ...webhookData,
+      processedWebhookEventIds: ['evt-success-1'],
+    });
     expect(store.booking.status).toBe(BookingStatus.CONFIRMED);
     expect(store.user.membershipStatus).toBe(MembershipStatus.ACTIVE);
     expect(store.user.memberSince).toBeInstanceOf(Date);
+  });
+
+
+  it('does not settle a payment when the webhook amount differs from the initialized amount', async () => {
+    const store = createStore();
+    const { provider, dataSource, invoicesService, notificationsService } = createProvider(store);
+
+    await provider.handle(
+      Buffer.from(JSON.stringify({
+        id: 'evt-wrong-amount',
+        event: 'charge.success',
+        data: { reference: paymentReference, amount: store.payment.amount + 1 },
+      })),
+      'valid-signature',
+    );
+
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(store.payment.status).toBe(PaymentStatus.PENDING);
+    expect(store.payment.paidAt).toBeUndefined();
+    expect(store.booking.status).toBe(BookingStatus.PENDING);
+    expect(invoicesService.generateForPayment).not.toHaveBeenCalled();
+    expect(notificationsService.create).not.toHaveBeenCalled();
+  });
+
+  it('ignores a repeated successful webhook without repeating downstream effects', async () => {
+    const store = createStore();
+    const { provider, invoicesService, notificationsService } = createProvider(store);
+    const payload = (id: string) => Buffer.from(JSON.stringify({
+      id,
+      event: 'charge.success',
+      data: { reference: paymentReference, amount: store.payment.amount },
+    }));
+
+    await provider.handle(payload('evt-first'), 'valid-signature');
+    await provider.handle(payload('evt-replay'), 'valid-signature');
+
+    expect(store.payment.status).toBe(PaymentStatus.SUCCESS);
+    expect(store.booking.status).toBe(BookingStatus.CONFIRMED);
+    expect(invoicesService.generateForPayment).toHaveBeenCalledTimes(1);
+    expect(notificationsService.create).toHaveBeenCalledTimes(1);
   });
 
   it('persists charge.failed details with a safe code and no secrets or personal data', async () => {
