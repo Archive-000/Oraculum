@@ -155,13 +155,30 @@ impl Escrow {
         validate_dispute_window(self.created_at, self.dispute_window)
     }
 
-    /// Timestamp after which the depositor may no longer raise a dispute, or
-    /// `None` when disputes are disabled for this escrow.
+    /// Last timestamp at which the depositor may still raise a dispute, or
+    /// `None` when disputes are disabled for this escrow (or the deadline
+    /// would overflow `u64`).
+    ///
+    /// The deadline is **inclusive**: a dispute raised at exactly
+    /// `created_at + dispute_window` is accepted, and one raised a second
+    /// later is rejected.
     pub fn dispute_deadline(&self) -> Option<u64> {
         if self.dispute_window == 0 {
             return None;
         }
         self.created_at.checked_add(self.dispute_window)
+    }
+
+    /// Whether a dispute may be raised at ledger timestamp `now`.
+    ///
+    /// Inclusive at the deadline (`now == created_at + dispute_window` is
+    /// open, `now == deadline + 1` is closed). Fails closed: disabled
+    /// disputes and an overflowing deadline both report `false`.
+    pub fn is_dispute_window_open(&self, now: u64) -> bool {
+        match self.dispute_deadline() {
+            Some(deadline) => now <= deadline,
+            None => false,
+        }
     }
 
     /// `true` once the funds have left the contract.
